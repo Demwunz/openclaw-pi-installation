@@ -1,6 +1,3 @@
-#This guide covers API keys for Claude (Anthropic) and enabling the web search feature.
-
-````markdown
 # 🤖 AI Model & Web Search Setup
 
 This guide covers getting your API keys and giving your bot internet access.
