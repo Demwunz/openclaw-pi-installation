@@ -1,6 +1,6 @@
 <!--
-OpenClaw Raspberry Pi SSD Secure Bootstrap
-README.md
+OpenClaw Raspberry Pi Secure Setup Guide
+Comprehensive security-first setup (no Pi-Imager CLI required)
 
 Template inspiration:
 https://github.com/othneildrew/Best-README-Template/blob/main/BLANK_README.md
@@ -11,24 +11,26 @@ https://github.com/othneildrew/Best-README-Template/blob/main/BLANK_README.md
 <br />
 <div align="center">
 
-  <h3 align="center">OpenClaw Raspberry Pi SSD Secure Bootstrap</h3>
+  <h3 align="center">OpenClaw Raspberry Pi Secure Setup Guide</h3>
 
   <p align="center">
-    Security-first, non-Docker provisioning for OpenClaw on a Raspberry Pi 4 booting from SSD.
+    A comprehensive, security-first guide to install and run OpenClaw on Raspberry Pi OS (SSD or SD), using SSH keys, UFW, Fail2ban, and safe-by-default gateway settings.
     <br />
     <br />
-    <a href="#getting-started"><strong>Quick Start »</strong></a>
+    <a href="#quick-start"><strong>Quick Start »</strong></a>
     <br />
     <br />
-    <a href="#about-the-project">About</a>
+    <a href="#security-baseline">Security Baseline</a>
     ·
-    <a href="#installation">Install</a>
+    <a href="#raspberry-pi-os-install">Raspberry Pi OS Install</a>
     ·
-    <a href="#usage">Usage</a>
+    <a href="#pi-hardening">Pi Hardening</a>
     ·
-    <a href="#security-notes">Security</a>
+    <a href="#openclaw-install">OpenClaw Install</a>
     ·
-    <a href="#troubleshooting">Troubleshooting</a>
+    <a href="#onboarding-settings">Onboarding Settings</a>
+    ·
+    <a href="#verification">Verification</a>
   </p>
 </div>
 
@@ -36,138 +38,296 @@ https://github.com/othneildrew/Best-README-Template/blob/main/BLANK_README.md
 
 ## Table of Contents
 
-- [About The Project](#about-the-project)
-- [Built With](#built-with)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-- [Usage](#usage)
-- [Security Notes](#security-notes)
-- [Troubleshooting](#troubleshooting)
-- [Roadmap](#roadmap)
-- [License](#license)
-- [Disclaimer](#disclaimer)
+- [Quick Start](#quick-start)
+- [About](#about)
+- [Security Baseline](#security-baseline)
+- [Prerequisites](#prerequisites)
+- [Raspberry Pi OS Install](#raspberry-pi-os-install)
+- [First Boot Checklist](#first-boot-checklist)
+- [Pi Hardening](#pi-hardening)
+  - [SSH Key Authentication](#ssh-key-authentication)
+  - [Firewall (UFW)](#firewall-ufw)
+  - [Fail2ban](#fail2ban)
+  - [Swap](#swap)
+- [Install Node.js 22+](#install-nodejs-22)
+- [Install OpenClaw](#install-openclaw)
+- [OpenClaw Onboarding Settings](#openclaw-onboarding-settings)
+- [Run as a Service](#run-as-a-service)
+- [Security Audit](#security-audit)
+- [Common Issues](#common-issues)
 - [Links](#links)
+- [Disclaimer](#disclaimer)
 
 ---
 
-## About The Project
+## Quick Start
 
-This repo provides a repeatable, security-focused workflow to:
+If you already have Raspberry Pi OS running and SSH access working:
 
-- wipe and re-flash an SSD for Raspberry Pi
-- install Raspberry Pi OS (64-bit)
-- harden the system (SSH keys-only, firewall, fail2ban)
-- install Node.js 22+
-- install **OpenClaw** (non-Docker)
-- set up a `systemd` service so OpenClaw starts on boot
-- keep the OpenClaw gateway **LAN/Internet-inaccessible by default** by binding to `127.0.0.1`
+```bash
+# update base OS
+sudo apt update
+sudo apt full-upgrade -y
+sudo apt install -y git curl ca-certificates ufw fail2ban unzip openssl
 
-> This is intentionally “secure-by-default”. You can always loosen restrictions later.
-> It’s much harder to recover from an exposed bot than it is to open access safely.
+# enable firewall (SSH only)
+sudo ufw allow OpenSSH
+sudo ufw --force enable
+sudo ufw status verbose
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+# enable fail2ban
+sudo systemctl enable --now fail2ban
+
+# install Node.js 22+
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# install OpenClaw
+sudo npm install -g openclaw@latest
+openclaw --version
+
+# run onboarding
+openclaw onboard
+```
+
+During onboarding, **bind the gateway to localhost only**:
+
+- ✅ `127.0.0.1`
+- ❌ not `0.0.0.0`
+
+Then install the Gateway service and run a security audit:
+
+```bash
+openclaw security audit --deep
+```
 
 ---
 
-## Built With
+## About
 
-- Raspberry Pi OS (64-bit)
-- Bash
-- SSH
-- `systemd`
-- UFW + Fail2ban
-- Node.js 22+
-- OpenClaw (installed via npm)
+This guide installs OpenClaw on a Raspberry Pi using a security-first baseline:
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+- SSH keys-only access
+- Firewall enabled (deny inbound by default)
+- Fail2ban enabled (SSH brute-force protection)
+- OpenClaw Gateway bound to localhost (no LAN exposure)
+- Gateway auth token set to a strong random value
+- Credential directory permissions locked down
+
+The goal is to build a stable “appliance-like” Pi host: boring, predictable, and safe.
 
 ---
 
-## Getting Started
+## Security Baseline
 
-### Prerequisites
+### Non-negotiable defaults (recommended)
 
-#### Hardware
-- Raspberry Pi 4 (recommended: 4GB+; tested target: 8GB)
-- USB SSD (this repo assumes SSD boot)
+- Do NOT expose OpenClaw Control UI directly to the internet.
+- Do NOT port-forward your router to the Raspberry Pi.
+- Bind OpenClaw gateway to `127.0.0.1` (localhost only).
+- Keep UFW enabled with default deny incoming.
+
+### Why “localhost only” matters
+
+If the gateway binds to `0.0.0.0`, anything on your network can attempt to connect.
+If misconfigured further, you could accidentally expose an admin surface externally.
+
+Binding to `127.0.0.1` makes it private by default.
+
+---
+
+## Prerequisites
+
+### Hardware
+
+- Raspberry Pi (Pi 4 recommended)
+- SD card OR USB SSD
 - Power supply
-- Network: Ethernet or Wi-Fi
-- Optional: touchscreen display
+- Ethernet or Wi-Fi
 
-#### On your Mac (or Linux workstation)
-- `ssh`
-- `diskutil` (macOS) or equivalent disk tooling
-- Raspberry Pi Imager installed
-- An SSH public key (recommended):
-  - `~/.ssh/id_ed25519.pub`
+### Your workstation
 
-#### LLM Provider (choose one)
-- Anthropic API key (Claude) OR
-- Local LLM (e.g., Ollama) if you accept slower Pi inference
+- macOS / Linux / Windows machine
+- SSH client
+- Raspberry Pi Imager installed (GUI)
 
 ---
 
-## Installation
+## Raspberry Pi OS Install
 
-This repo includes a macOS-run provisioning script:
+### Recommended OS
 
-- `setup-openclaw-pi.sh`
+✅ Raspberry Pi OS Lite (64-bit)
 
-It performs:
-- SSD erase + OS flash (via Raspberry Pi Imager CLI if available)
-- Pi provisioning over SSH:
-  - updates & packages
-  - swap setup
-  - SSH hardening
-  - UFW + Fail2ban
-  - Node.js 22+
-  - OpenClaw install
-  - systemd service creation
+It’s stable and minimal, and you can add only what you need later.
 
-### 1) Clone the repo
+### Flash OS with Raspberry Pi Imager (GUI)
 
-```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
-chmod +x setup-openclaw-pi.sh
-```
+1. Open **Raspberry Pi Imager**
+2. Select:
+   - OS: **Raspberry Pi OS Lite (64-bit)**
+   - Storage: your SD card or SSD
+3. Open **Advanced settings** (gear icon) and set:
+   - Hostname: e.g. `clawpi`
+   - Enable SSH: ✅
+   - Authentication: ✅ use password (temporary is fine)
+   - Username: choose a dedicated user (example: `openclaw`)
+   - Wi-Fi: configure if needed
+   - Locale/timezone: optional
 
-### 2) Run the bootstrap script
+4. Write image
+5. Boot your Pi
 
-```bash
-./setup-openclaw-pi.sh
-```
-
-> ⚠️ WARNING: The script will ask you to choose the target SSD disk identifier.
-> Choosing the wrong disk will wipe the wrong device. Review carefully.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+> Tip: If you can’t SSH after boot, it’s usually Wi-Fi settings, hostname mismatch, or the wrong username.
 
 ---
 
-## Usage
+## First Boot Checklist
 
-### Recommended first-run flow
-
-1) Run the bootstrap script on your Mac:
+Once the Pi boots, SSH in:
 
 ```bash
-./setup-openclaw-pi.sh
+ssh <user>@<hostname>.local
 ```
 
-2) Boot your Pi from the SSD.
-
-3) SSH into the Pi:
+If `.local` does not resolve, use the IP from your router:
 
 ```bash
-ssh openclaw@onepi.local
+ssh <user>@192.168.x.x
 ```
 
-4) Run OpenClaw’s setup/onboarding command (varies by version):
+Then confirm basics:
 
 ```bash
+whoami
+hostname
+uname -a
+```
+
+---
+
+## Pi Hardening
+
+### SSH Key Authentication
+
+On your workstation (Mac/Linux), create a key if needed:
+
+```bash
+ssh-keygen -t ed25519 -C "pi-admin"
+```
+
+Copy your public key to the Pi:
+
+```bash
+ssh-copy-id <user>@<pi-ip-or-hostname>
+```
+
+Verify it works:
+
+```bash
+ssh <user>@<pi-ip-or-hostname>
+```
+
+### Disable password SSH (recommended once keys work)
+
+Edit:
+
+```bash
+sudo nano /etc/ssh/sshd_config
+```
+
+Set:
+
+```text
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+```
+
+Restart SSH:
+
+```bash
+sudo systemctl restart ssh
+```
+
+---
+
+### Firewall (UFW)
+
+Install + enable:
+
+```bash
+sudo apt install -y ufw
+sudo ufw allow OpenSSH
+sudo ufw --force enable
+sudo ufw status verbose
+```
+
+Expected:
+- Default deny incoming
+- SSH allowed
+
+---
+
+### Fail2ban
+
+Install + enable:
+
+```bash
+sudo apt install -y fail2ban
+sudo systemctl enable --now fail2ban
+sudo systemctl status fail2ban --no-pager
+```
+
+---
+
+### Swap
+
+Raspberry Pi OS may use **zram** by default.
+
+Check swap:
+
+```bash
+swapon --show
+free -h
+```
+
+If swap exists (zram or swapfile), you're good.
+
+---
+
+## Install Node.js 22+
+
+Install Node.js 22 from NodeSource:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+node -v
+npm -v
+```
+
+You should see Node v22.x.
+
+---
+
+## Install OpenClaw
+
+Install globally:
+
+```bash
+sudo npm install -g openclaw@latest
+openclaw --version
 openclaw --help
+```
+
+---
+
+## OpenClaw Onboarding Settings
+
+Run onboarding:
+
+```bash
 openclaw onboard
 ```
 
@@ -177,106 +337,137 @@ If `onboard` is not available:
 openclaw configure
 ```
 
-5) **CRITICAL SECURITY SETTING: bind gateway to localhost**
-During configuration, set the gateway bind address to:
+### Recommended secure choices
 
-```text
-127.0.0.1
-```
+- Gateway bind: ✅ `127.0.0.1`
+- Gateway port: ✅ default is fine
+- Gateway auth: ✅ Token
+- Gateway token: ✅ long random token
+- Tailscale exposure: ✅ Off
+- Hooks: ✅ Skip for now
+- Skills: ✅ Skip for now (start minimal)
 
-✅ Correct:
-- binds only to the Pi itself
+### Fix short token warning (if audit reports it)
 
-❌ Incorrect:
-- `0.0.0.0` (exposes to LAN and potentially the internet)
-
-6) Restart the OpenClaw service:
-
-```bash
-sudo systemctl restart openclaw
-sudo systemctl status openclaw --no-pager
-```
-
-7) View logs:
+Generate a strong token:
 
 ```bash
-journalctl -u openclaw -n 200 --no-pager
+openssl rand -hex 32
+```
+
+Set it:
+
+```bash
+openclaw config set gateway.auth.token "<PASTE_TOKEN_HERE>"
+```
+
+Restart gateway service after changes:
+
+```bash
+systemctl --user restart openclaw-gateway
 ```
 
 ---
 
-## Security Notes
+## Run as a Service
 
-### 🔒 Non-negotiable defaults (recommended)
+Onboarding will typically install the **Gateway user service**:
 
-- Do NOT expose OpenClaw Admin/UI directly to the internet
-- Do NOT port-forward from your router to the Pi
-- Bind gateway to:
-  - ✅ `127.0.0.1`
-  - ❌ not `0.0.0.0`
+- `openclaw-gateway.service` (systemd user service)
 
-### Chat integrations (Telegram / WhatsApp / etc.)
-If you enable chat channels:
-- enable “privacy mode” (Telegram BotFather)
-- allowlist your user/number if supported
-- do not run a bot that responds to arbitrary strangers
+Check status:
 
-### Prompt injection risk (email integrations)
-If you connect email:
-- treat incoming content as untrusted input
-- avoid giving the agent broad system/file permissions
-- keep tools minimal and explicit
+```bash
+systemctl --user status openclaw-gateway --no-pager
+```
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+View logs:
+
+```bash
+journalctl --user -u openclaw-gateway -n 200 --no-pager
+```
+
+Restart service:
+
+```bash
+systemctl --user restart openclaw-gateway
+```
 
 ---
 
-## Troubleshooting
+## Verification
 
-### I can’t SSH in after password auth was disabled
-You must confirm SSH key auth works *before* disabling passwords.
-
-If you locked yourself out:
-- connect a keyboard + monitor to the Pi
-- edit:
+### Confirm the gateway is running
 
 ```bash
-sudo nano /etc/ssh/sshd_config
+systemctl --user status openclaw-gateway --no-pager
 ```
 
-Temporarily set:
-
-```text
-PasswordAuthentication yes
-```
-
-Then:
+### Confirm it is localhost-only
 
 ```bash
-sudo systemctl restart ssh
+ss -lntp | grep 18789 || true
 ```
 
-### Raspberry Pi Imager CLI flags failed
-Pi Imager CLI flags differ by version.
+Expected output includes:
 
-Workarounds:
-- flash the SSD using the Raspberry Pi Imager GUI
-- rerun provisioning steps manually via SSH
+- `127.0.0.1:18789`
+- `[::1]:18789`
 
-### OpenClaw service fails to start
-Check logs:
+If you see `0.0.0.0:18789`, your gateway is exposed to LAN and must be fixed.
+
+---
+
+## Security Audit
+
+Run the deep audit:
 
 ```bash
-journalctl -u openclaw -n 200 --no-pager
+openclaw security audit --deep
 ```
 
-Also confirm the available OpenClaw commands:
+Expected:
+- 0 critical
+
+Note:
+- `gateway.trusted_proxies_missing` is safe to ignore if you keep the UI local-only.
+- If you expose a Control UI through a reverse proxy later, configure `gateway.trustedProxies`.
+
+---
+
+## Common Issues
+
+### Permission denied (publickey) when SSH'ing into the Pi
+
+You are using the wrong username, or your public key was not copied to the Pi.
+
+Fix:
 
 ```bash
-openclaw --help
+ssh-copy-id <user>@<pi-ip-or-hostname>
 ```
 
-Your OpenClaw version may use a different gateway/start command, and the systemd `ExecStart=` may need adjustment.
+---
+
+### UFW enable warning about disrupting SSH
+
+This is normal.
+
+Always allow SSH before enabling UFW:
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw --force enable
+```
+
+---
+
+### Skills failing to install with EACCES permission errors
+
+This usually means npm is trying to write to a system directory.
+For a minimal secure setup, skip skills until your base install is stable.
+
+---
 
 ## 🦞 Supplemental Setup Guides
 
@@ -287,34 +478,23 @@ For detailed, step-by-step setup of specific features, refer to these reference 
 - [Secure Telegram Integration](TELEGRAM_SETUP.md) — Instructions for bot creation, privacy settings, and whitelisting.
 - [Web Search & Skill Management](WEB_SEARCH.md) — How to extend your bot's capabilities and perform security audits.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
 ---
 
-## Roadmap
+## Links
 
-- [ ] Add touchscreen kiosk-mode installer (Pi OS Lite + minimal kiosk browser)
-- [ ] Add Cloudflare Tunnel + Access guide for secure remote access
-- [ ] Add local metrics/log dashboard (safe buttons + minimal UI)
-- [ ] Improve script compatibility and detection for Pi Imager CLI differences
+- OpenClaw:
+  https://github.com/openclaw/openclaw
+
+- OpenClaw Docs:
+  https://docs.openclaw.ai
 
 ---
 
 ## Disclaimer
 
-This project is provided **as-is**.
+This guide is provided **as-is**.
+You are responsible for reviewing and understanding commands before running them.
 
-- It performs destructive disk operations (data loss is expected).
-- Review scripts before running.
-- You assume all responsibility for the resulting system security and configuration.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
----
-
-## Links
-
-OpenClaw:
-- https://github.com/openclaw/openclaw
-
-If you want to contribute improvements, open an issue or PR in this repo.
+- Disk flashing wipes data.
+- Security settings must be validated in your environment.
+- Do not expose admin/control surfaces to the internet without additional protections.

@@ -10,49 +10,51 @@ set -euo pipefail
 #  - Node.js 22 install + OpenClaw install (non-Docker)
 #  - systemd service + basic host hardening
 #
-# WARNING: This erases the target disk.
+# DANGEROUS: This script can ERASE a disk.
+# Safety features:
+#   - Lists disks and forces explicit disk selection (e.g. disk4)
+#   - Shows disk details before erasing
+#   - Refuses to erase internal disks
+#   - Requires a "type-to-confirm" phrase: ERASE diskX
 ###############################################################################
 
 # -----------------------------
-# User-configurable variables
+# Config (override via env vars)
 # -----------------------------
-PI_HOST="${PI_HOST:-onepi.local}"          # e.g. onepi.local or an IP
-PI_USER="${PI_USER:-openclaw}"             # username configured in Pi Imager advanced settings
+PI_HOST="${PI_HOST:-onepi.local}"
+PI_USER="${PI_USER:-openclaw}"
 PI_SSH_PORT="${PI_SSH_PORT:-22}"
 SSH_PUBKEY="${SSH_PUBKEY:-$HOME/.ssh/id_ed25519.pub}"
 
-# Raspberry Pi Imager settings
-RPI_IMAGER_BIN="${RPI_IMAGER_BIN:-rpi-imager}"   # ensure Raspberry Pi Imager is installed
-RPI_OS_PRESET="${RPI_OS_PRESET:-raspios_arm64}"  # preset name varies; we will prompt if needed
-RPI_STORAGE_DISK=""                               # will prompt
-RPI_OS_IMAGE_PATH="${RPI_OS_IMAGE_PATH:-}"        # optional .img/.zip path; if empty, use preset
-RPI_SET_WIFI="${RPI_SET_WIFI:-0}"                 # 1 to attempt wifi config via imager (optional)
+# Optional: if you want to skip the flash step and do only provisioning, set:
+SKIP_FLASH="${SKIP_FLASH:-0}"
 
-# OpenClaw settings
+# Pi Imager CLI (optional). If missing, script will tell you to flash via GUI.
+RPI_IMAGER_BIN="${RPI_IMAGER_BIN:-rpi-imager}"
+RPI_OS_PRESET="${RPI_OS_PRESET:-raspios_arm64}"   # preset name varies by imager version
+RPI_OS_IMAGE_PATH="${RPI_OS_IMAGE_PATH:-}"        # optional local .img/.zip
+
 OPENCLAW_NPM_PKG="${OPENCLAW_NPM_PKG:-openclaw@latest}"
 OPENCLAW_SERVICE_NAME="${OPENCLAW_SERVICE_NAME:-openclaw}"
-OPENCLAW_BIND_ADDR="${OPENCLAW_BIND_ADDR:-127.0.0.1}"
 
 # -----------------------------
 # Helpers
 # -----------------------------
 die() { echo "ERROR: $*" >&2; exit 1; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
-}
-
-confirm() {
-  local prompt="$1"
-  read -r -p "$prompt [y/N]: " ans
-  [[ "${ans:-}" =~ ^[Yy]$ ]]
+confirm_phrase() {
+  local phrase="$1"
+  echo ""
+  echo "Type exactly to confirm: ${phrase}"
+  read -r -p "> " ans
+  [[ "$ans" == "$phrase" ]] || die "Confirmation did not match. Aborting."
 }
 
 wait_for_ssh() {
-  local host="$1"
-  local port="$2"
+  local host="$1" port="$2"
   echo "Waiting for SSH on ${host}:${port} ..."
-  for i in $(seq 1 120); do
+  for _ in $(seq 1 180); do
     if nc -z "$host" "$port" >/dev/null 2>&1; then
       echo "SSH is reachable."
       return 0
@@ -76,7 +78,7 @@ run_ssh_sudo() {
 }
 
 # -----------------------------
-# Checks
+# Preflight
 # -----------------------------
 need_cmd diskutil
 need_cmd ssh
@@ -84,87 +86,109 @@ need_cmd nc
 
 [[ -f "$SSH_PUBKEY" ]] || die "SSH public key not found at: $SSH_PUBKEY (set SSH_PUBKEY=...)"
 
-if ! command -v "$RPI_IMAGER_BIN" >/dev/null 2>&1; then
-  die "Raspberry Pi Imager CLI not found ('${RPI_IMAGER_BIN}'). Install Raspberry Pi Imager and ensure rpi-imager is in PATH."
-fi
+echo "=================================================="
+echo "OpenClaw Pi Bootstrap (macOS) — DESTRUCTIVE ACTIONS"
+echo "=================================================="
+echo "This script can ERASE a disk. Read carefully."
+echo ""
 
-echo "=============================="
-echo "STEP 1: Select target SSD disk"
-echo "=============================="
+# -----------------------------
+# Step 1: Choose target disk
+# -----------------------------
+echo "Available disks:"
 diskutil list
 echo ""
-echo "Enter the target disk identifier (e.g. disk4). THIS WILL BE ERASED."
-read -r -p "Target disk: " RPI_STORAGE_DISK
-[[ "$RPI_STORAGE_DISK" =~ ^disk[0-9]+$ ]] || die "Invalid disk identifier: $RPI_STORAGE_DISK"
 
+read -r -p "Enter target SSD disk identifier (e.g. disk4): " TARGET_DISK
+[[ "$TARGET_DISK" =~ ^disk[0-9]+$ ]] || die "Invalid disk identifier: $TARGET_DISK"
+
+# Show disk details and enforce "external" (not internal/system)
 echo ""
-echo "About to ERASE: /dev/${RPI_STORAGE_DISK}"
-diskutil info "/dev/${RPI_STORAGE_DISK}" | sed -n '1,25p'
-echo ""
+echo "Disk details for /dev/${TARGET_DISK}:"
+diskutil info "/dev/${TARGET_DISK}" || die "Could not read disk info."
 
-confirm "Proceed to erase /dev/${RPI_STORAGE_DISK} ?" || die "Aborted."
-
-echo "Erasing disk..."
-diskutil eraseDisk FAT32 RPI "/dev/${RPI_STORAGE_DISK}"
-
-echo ""
-echo "======================================"
-echo "STEP 2: Flash Raspberry Pi OS to SSD"
-echo "======================================"
-echo "If you have a local OS image (.img/.zip), set RPI_OS_IMAGE_PATH=/path/to/image"
-echo "Otherwise we will try to use a Pi Imager OS preset via --cli."
-echo ""
-
-if [[ -n "$RPI_OS_IMAGE_PATH" ]]; then
-  [[ -f "$RPI_OS_IMAGE_PATH" ]] || die "RPI_OS_IMAGE_PATH does not exist: $RPI_OS_IMAGE_PATH"
-  echo "Flashing from local image: $RPI_OS_IMAGE_PATH"
-  # Pi Imager CLI usage varies by version; this is a common pattern.
-  # If your imager rejects this, run: rpi-imager --help / rpi-imager --cli --help
-  "$RPI_IMAGER_BIN" --cli \
-    --image "$RPI_OS_IMAGE_PATH" \
-    --storage "/dev/${RPI_STORAGE_DISK}"
-else
-  echo "Flashing using OS preset: ${RPI_OS_PRESET}"
-  echo "NOTE: Preset names vary. If this fails, run: rpi-imager --cli --list-os"
-  "$RPI_IMAGER_BIN" --cli \
-    --os "$RPI_OS_PRESET" \
-    --storage "/dev/${RPI_STORAGE_DISK}"
+# Refuse internal disks (extra safety)
+INTERNAL="$(diskutil info "/dev/${TARGET_DISK}" | awk -F': ' '/Device Location|Internal/ {print tolower($2)}' | head -n 1)"
+# Many macs show "Device Location: Internal" or "Internal: Yes"
+if diskutil info "/dev/${TARGET_DISK}" | grep -qiE 'Device Location:\s*Internal|Internal:\s*Yes'; then
+  die "Refusing to erase an INTERNAL disk (/dev/${TARGET_DISK}). Choose the external SSD."
 fi
 
 echo ""
-echo "=================================================="
-echo "STEP 3: Boot Pi from SSD, then provision over SSH"
-echo "=================================================="
-echo "Now:"
-echo "  1) Move SSD to the Pi"
-echo "  2) Boot the Pi"
-echo "  3) Ensure it is on the same network as this Mac"
+echo "WARNING: Next step may ERASE /dev/${TARGET_DISK} بالكامل."
+confirm_phrase "ERASE ${TARGET_DISK}"
+
+# -----------------------------
+# Step 2: Erase disk
+# -----------------------------
+echo "Erasing /dev/${TARGET_DISK} ..."
+diskutil eraseDisk FAT32 RPI "/dev/${TARGET_DISK}"
+
+# -----------------------------
+# Step 3: Flash Raspberry Pi OS (optional)
+# -----------------------------
+if [[ "$SKIP_FLASH" == "1" ]]; then
+  echo ""
+  echo "SKIP_FLASH=1 set — skipping OS flash step."
+else
+  echo ""
+  echo "======================================"
+  echo "Flashing Raspberry Pi OS to /dev/${TARGET_DISK}"
+  echo "======================================"
+
+  if command -v "$RPI_IMAGER_BIN" >/dev/null 2>&1; then
+    if [[ -n "$RPI_OS_IMAGE_PATH" ]]; then
+      [[ -f "$RPI_OS_IMAGE_PATH" ]] || die "RPI_OS_IMAGE_PATH not found: $RPI_OS_IMAGE_PATH"
+      echo "Using local OS image: $RPI_OS_IMAGE_PATH"
+      "$RPI_IMAGER_BIN" --cli --image "$RPI_OS_IMAGE_PATH" --storage "/dev/${TARGET_DISK}" || {
+        echo "Pi Imager CLI failed. Flash via GUI and re-run with SKIP_FLASH=1."
+        exit 1
+      }
+    else
+      echo "Using OS preset: $RPI_OS_PRESET"
+      echo "If this fails, flash via Raspberry Pi Imager GUI, then re-run with SKIP_FLASH=1."
+      "$RPI_IMAGER_BIN" --cli --os "$RPI_OS_PRESET" --storage "/dev/${TARGET_DISK}" || {
+        echo "Pi Imager CLI failed. Flash via GUI and re-run with SKIP_FLASH=1."
+        exit 1
+      }
+    fi
+  else
+    echo "Pi Imager CLI not found (${RPI_IMAGER_BIN})."
+    echo "Please flash the SSD using Raspberry Pi Imager GUI, then re-run with:"
+    echo "  SKIP_FLASH=1 ./setup-openclaw-pi.sh"
+    exit 1
+  fi
+fi
+
+# -----------------------------
+# Step 4: Boot Pi and provision via SSH
+# -----------------------------
 echo ""
-confirm "Continue once the Pi has booted?" || die "Aborted."
+echo "=================================================="
+echo "Now move the SSD to the Pi and boot it."
+echo "Ensure it's on the same network as this Mac."
+echo "Then press Enter to continue provisioning over SSH."
+echo "=================================================="
+read -r -p "Press Enter when Pi is booted... " _
 
 wait_for_ssh "$PI_HOST" "$PI_SSH_PORT"
 
 echo ""
-echo "----------------------------------------"
-echo "STEP 4: Push SSH key (idempotent)"
-echo "----------------------------------------"
+echo "Pushing SSH key (idempotent) ..."
 PUBKEY_CONTENT="$(cat "$SSH_PUBKEY")"
 run_ssh "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && grep -qF $(printf '%q' "$PUBKEY_CONTENT") ~/.ssh/authorized_keys || echo $(printf '%q' "$PUBKEY_CONTENT") >> ~/.ssh/authorized_keys"
 
 echo ""
-echo "----------------------------------------"
-echo "STEP 5: Provision OS + security hardening"
-echo "----------------------------------------"
-
-# Update + baseline packages
+echo "Provisioning OS packages + security hardening ..."
 run_ssh_sudo "
 set -euo pipefail
 apt update
 DEBIAN_FRONTEND=noninteractive apt full-upgrade -y
-DEBIAN_FRONTEND=noninteractive apt install -y git curl wget unzip ca-certificates ufw fail2ban openssl net-tools
+DEBIAN_FRONTEND=noninteractive apt install -y git curl wget unzip ca-certificates ufw fail2ban openssl net-tools perl
 "
 
-# Create swap (2GB) if not present
+echo ""
+echo "Adding 2GB swapfile if missing ..."
 run_ssh_sudo "
 set -euo pipefail
 if ! swapon --show | grep -q '/swapfile'; then
@@ -176,19 +200,21 @@ if ! swapon --show | grep -q '/swapfile'; then
 fi
 "
 
-# SSH hardening: disable password auth + root login
-# (IMPORTANT: if you rely on password SSH, you will lock yourself out—ensure key works first.)
+echo ""
+echo "Hardening SSH (keys-only, no root login) ..."
+echo "NOTE: This will disable SSH password login. Ensure your key works."
 run_ssh_sudo "
 set -euo pipefail
 SSHD=/etc/ssh/sshd_config
 cp -n \$SSHD \${SSHD}.bak || true
-
-perl -0777 -i -pe 's/^#?\\s*PermitRootLogin\\s+.*/PermitRootLogin no/mg; s/^#?\\s*PasswordAuthentication\\s+.*/PasswordAuthentication no/mg; s/^#?\\s*PubkeyAuthentication\\s+.*/PubkeyAuthentication yes/mg' \$SSHD
-
+perl -0777 -i -pe 's/^#?\\s*PermitRootLogin\\s+.*/PermitRootLogin no/mg;
+                  s/^#?\\s*PasswordAuthentication\\s+.*/PasswordAuthentication no/mg;
+                  s/^#?\\s*PubkeyAuthentication\\s+.*/PubkeyAuthentication yes/mg' \$SSHD
 systemctl restart ssh
 "
 
-# Firewall: allow SSH only
+echo ""
+echo "Enabling firewall (UFW) ..."
 run_ssh_sudo "
 set -euo pipefail
 ufw allow OpenSSH
@@ -196,7 +222,8 @@ ufw --force enable
 ufw status verbose
 "
 
-# Fail2ban enable
+echo ""
+echo "Enabling fail2ban ..."
 run_ssh_sudo "
 set -euo pipefail
 systemctl enable fail2ban
@@ -205,46 +232,40 @@ systemctl status fail2ban --no-pager
 "
 
 echo ""
-echo "----------------------------------------"
-echo "STEP 6: Install Node.js 22 + OpenClaw"
-echo "----------------------------------------"
-
-# Node.js 22 via NodeSource, then OpenClaw
+echo "Installing Node.js 22+ ..."
 run_ssh_sudo "
 set -euo pipefail
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 DEBIAN_FRONTEND=noninteractive apt install -y nodejs
 node -v
 npm -v
+"
+
+echo ""
+echo "Installing OpenClaw ..."
+run_ssh_sudo "
+set -euo pipefail
 npm install -g ${OPENCLAW_NPM_PKG}
 openclaw --version
 "
 
 echo ""
-echo "----------------------------------------"
-echo "STEP 7: Create a systemd service (safe defaults)"
-echo "----------------------------------------"
-# We do NOT assume openclaw has a stable daemon installer; create service unit.
-# You may need to adjust ExecStart depending on your OpenClaw version (we attempt common forms).
+echo "Creating systemd service (${OPENCLAW_SERVICE_NAME}) ..."
 run_ssh_sudo "
 set -euo pipefail
-
 OPENCLAW_BIN=\$(command -v openclaw)
 if [[ -z \"\$OPENCLAW_BIN\" ]]; then
   echo 'openclaw not found in PATH' >&2
   exit 1
 fi
 
-# Guess a gateway command:
-# Try: openclaw gateway
-# Fallback: openclaw start
+# Best-effort command detection
 GATEWAY_CMD=''
 if \$OPENCLAW_BIN --help 2>/dev/null | grep -qE '\\bgateway\\b'; then
   GATEWAY_CMD=\"\$OPENCLAW_BIN gateway\"
 elif \$OPENCLAW_BIN --help 2>/dev/null | grep -qE '\\bstart\\b'; then
   GATEWAY_CMD=\"\$OPENCLAW_BIN start\"
 else
-  # last resort: just run openclaw (user must adjust)
   GATEWAY_CMD=\"\$OPENCLAW_BIN\"
 fi
 
@@ -274,9 +295,7 @@ ReadWritePaths=/home/${PI_USER}
 WantedBy=multi-user.target
 UNIT
 
-# Replace placeholder with detected command
 sed -i \"s|__GATEWAY_CMD__|\${GATEWAY_CMD//|/\\\\|}|g\" /etc/systemd/system/${OPENCLAW_SERVICE_NAME}.service
-
 systemctl daemon-reload
 systemctl enable ${OPENCLAW_SERVICE_NAME}
 systemctl restart ${OPENCLAW_SERVICE_NAME}
@@ -284,32 +303,13 @@ systemctl status ${OPENCLAW_SERVICE_NAME} --no-pager
 "
 
 echo ""
-echo "----------------------------------------"
-echo "STEP 8: Verify listening sockets"
-echo "----------------------------------------"
-run_ssh_sudo "
-set -euo pipefail
-echo 'Listening sockets (expect OpenClaw to be localhost-only after you set bind=127.0.0.1 in its config):'
-ss -lntp | head -n 50
-"
-
-cat <<EOF
-
-DONE (provisioning complete).
-
-NEXT (manual, important):
-  1) Run OpenClaw's onboarding/config wizard on the Pi:
-       ssh ${PI_USER}@${PI_HOST}
-       openclaw --help
-       openclaw onboard   (or openclaw configure)
-  2) In the wizard/config, set gateway bind address to: ${OPENCLAW_BIND_ADDR}
-     (Do NOT use 0.0.0.0)
-  3) Set up Telegram:
-     - BotFather privacy mode ON
-     - Pair your account using the pairing code flow
-  4) After configuration, restart service:
-       sudo systemctl restart ${OPENCLAW_SERVICE_NAME}
-     and check logs:
-       journalctl -u ${OPENCLAW_SERVICE_NAME} -n 200 --no-pager
-
-EOF
+echo "DONE."
+echo ""
+echo "NEXT (manual, important):"
+echo "  1) SSH into the Pi: ssh ${PI_USER}@${PI_HOST}"
+echo "  2) Run OpenClaw wizard (command varies):"
+echo "       openclaw --help"
+echo "       openclaw onboard    # or: openclaw configure"
+echo "  3) In config, bind gateway to 127.0.0.1 (NOT 0.0.0.0)."
+echo "  4) Restart service: sudo systemctl restart ${OPENCLAW_SERVICE_NAME}"
+echo "  5) Logs: journalctl -u ${OPENCLAW_SERVICE_NAME} -n 200 --no-pager"
