@@ -278,6 +278,17 @@ openclaw --help
 
 Your OpenClaw version may use a different gateway/start command, and the systemd `ExecStart=` may need adjustment.
 
+## 🦞 Supplemental Setup Guides
+
+
+For detailed, step-by-step setup of specific features, refer to these reference guides:
+
+- [Detailed AI Model & Web Setup](CLAUDE_SETUP.md) — Comprehensive guide for Anthropic API and Brave Search integration.
+- [Secure Telegram Integration](TELEGRAM_SETUP.md) — Instructions for bot creation, privacy settings, and whitelisting.
+- [Web Search & Skill Management](WEB_SEARCH.md) — How to extend your bot's capabilities and perform security audits.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
 ---
 
 ## Roadmap
@@ -286,12 +297,6 @@ Your OpenClaw version may use a different gateway/start command, and the systemd
 - [ ] Add Cloudflare Tunnel + Access guide for secure remote access
 - [ ] Add local metrics/log dashboard (safe buttons + minimal UI)
 - [ ] Improve script compatibility and detection for Pi Imager CLI differences
-
----
-
-## License
-
-Choose a license for your repo (MIT is common). Add a `LICENSE` file to match.
 
 ---
 
